@@ -143,6 +143,10 @@ def cmd_doctor(_a) -> None:
     if others:
         print(f"  also measured in {', '.join(others)} (`localllm list`)")
     print(f"  holds ~{ctx // 1000}k tokens at once (~{ctx // sizing.TOKENS_PER_PAGE} pages of text) next to the model")
+    ram_est = sizing.ram_estimate_gb(m)
+    ram_free = max(0.0, runtime.ram_available_gb() - ram_est["total_gb"])
+    print(f"  uses ~{ram_est['total_gb']:.1f} GB of system RAM: ~{ram_est['embed_gb']:.1f} GB embeddings/CPU-mapped + ~{ram_est['cache_gb']:.1f} GB caches (est.)")
+    print(f"  leaves ~{ram_free:.0f} GB of RAM free for other apps (est.)")
     same = bw == sizing.BANDWIDTH["rx 9070 xt"]
     est = m["tok_s_9070xt"] if same else (int(m["tok_s_9070xt"] * bw / 640) if bw else None)
     if est:

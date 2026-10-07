@@ -25,6 +25,9 @@ DESKTOP_GB = 1.0        # what the OS/desktop usually keeps on the card
 OVERHEAD_GB = 0.7       # compute buffers + small fixed caches
 TOKENS_PER_PAGE = 600   # ~450 English words
 
+RAM_EMBED_SHARE = 0.02  # token embeddings + output tensor stay CPU-mapped even when the model lives in VRAM
+RAM_HOST_GB = 0.5       # llama-server process + host-side compute buffers (est.)
+
 # reference shapes people actually download: (label, total params B, active params B)
 SHAPES = [("4B", 4, 4), ("8B", 8, 8), ("14B", 14, 14), ("24-32B", 27, 27), ("30B MoE (3B active)", 30, 3),
           ("70B", 70, 70), ("120B MoE (10B active)", 120, 10)]
@@ -74,3 +77,15 @@ def context_tokens(vram_gb: float, model: dict) -> int:
     """How many tokens of conversation/document fit next to the weights (KV cache at q8)."""
     free = vram_gb - DESKTOP_GB - OVERHEAD_GB - model["gb"] - model.get("fixed_cache_gb", 0)
     return max(0, min(model.get("max_ctx", 131072), int(free * 2**20 / model["kv_kb_per_token"])))
+
+
+def ram_estimate_gb(model: dict) -> dict:
+    """Estimate of the chosen model's system-RAM footprint while the server runs (est., not measured).
+
+    The weights themselves live in VRAM; llama.cpp keeps the token embeddings/output tensor in
+    RAM (CPU-mapped), plus the server process and host-side compute buffers on top. The KV cache
+    counts against VRAM, not RAM, so it isn't included here.
+    """
+    embed = model["gb"] * RAM_EMBED_SHARE
+    return {"embed_gb": round(embed, 1), "cache_gb": round(RAM_HOST_GB, 1),
+            "total_gb": round(embed + RAM_HOST_GB, 1)}

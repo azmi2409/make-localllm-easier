@@ -88,6 +88,28 @@ def ram_gb() -> float:
     return int(subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout) / 2**30
 
 
+def ram_available_gb() -> float:
+    """Best-effort currently-available system RAM in GB; falls back to total RAM when unknown."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class MS(ctypes.Structure):
+                _fields_ = [("len", ctypes.c_ulong), ("load", ctypes.c_ulong), ("total", ctypes.c_ulonglong),
+                            ("avail", ctypes.c_ulonglong), ("a", ctypes.c_ulonglong), ("b", ctypes.c_ulonglong),
+                            ("c", ctypes.c_ulonglong), ("d", ctypes.c_ulonglong), ("e", ctypes.c_ulonglong)]
+            s = MS(); s.len = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(s))
+            return s.avail / 2**30
+        if Path("/proc/meminfo").exists():
+            m = re.search(r"MemAvailable:\s+(\d+)", Path("/proc/meminfo").read_text())
+            if m:
+                return int(m[1]) / 2**20
+    except OSError:
+        pass
+    return ram_gb()
+
+
 def server_args(model: Path, device: str | None, port: int, ctx: int, mtp: bool) -> list[str]:
     args = ["-m", str(model), "--host", "127.0.0.1", "--port", str(port), "-c", str(ctx), "-ngl", "999",
             "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0", "-np", "1", "-kvu", "-fit", "off", "--load-mode", "none"]

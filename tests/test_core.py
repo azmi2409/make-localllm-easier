@@ -46,3 +46,28 @@ def test_sizing_tiers_16gb():
 def test_pick_prefers_accuracy_then_speed_on_ties():
     assert catalog.pick(15.9, "zh") == "qwen3.8-27b-q3"      # 5.5 points better in Chinese
     assert catalog.pick(15.9, "en") == "gemma4-26b-a4b-qat"  # tie on accuracy, faster
+
+
+def test_ram_estimate_components():
+    from localllm import sizing
+    est = sizing.ram_estimate_gb({"gb": 13.3})
+    assert est == {"embed_gb": 0.3, "cache_gb": 0.5, "total_gb": 0.8}
+    assert est["embed_gb"] < est["total_gb"]
+
+
+def test_ram_available_gb_is_positive():
+    assert runtime.ram_available_gb() > 0
+
+
+def test_doctor_shows_ram_line(monkeypatch, capsys):
+    from localllm import catalog, cli, sizing
+    from localllm.bench import system_language
+    dev = {"id": "Vulkan0", "name": "AMD Radeon RX 9070 XT", "total_gb": 15.9}
+    monkeypatch.setattr(cli, "_machine", lambda: (cli.Path("llama-server"), [dev], dev, 32.0))
+    monkeypatch.setattr(cli.runtime, "ram_available_gb", lambda: 28.0)
+    cli.cmd_doctor(None)
+    out = capsys.readouterr().out
+    est = sizing.ram_estimate_gb(catalog.MODELS[catalog.pick(15.9, system_language())])
+    assert (f"uses ~{est['total_gb']:.1f} GB of system RAM: ~{est['embed_gb']:.1f} GB "
+            "embeddings/CPU-mapped + ~0.5 GB caches (est.)") in out
+    assert f"leaves ~{max(0.0, 28.0 - est['total_gb']):.0f} GB of RAM free for other apps (est.)" in out
