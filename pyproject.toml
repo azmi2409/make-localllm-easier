@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "make-localllm-easier"
+version = "0.1.0"
+description = "One command runs the best local AI your PC can handle: measured model picks + a tuned llama.cpp (AMD, NVIDIA, Intel, Apple)"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["llm", "local-llm", "llama.cpp", "vulkan", "amd", "gguf", "thai", "offline-ai"]
+classifiers = ["Programming Language :: Python :: 3", "License :: OSI Approved :: MIT License", "Operating System :: OS Independent", "Topic :: Scientific/Engineering :: Artificial Intelligence"]
+
+[project.urls]
+Homepage = "https://github.com/phonology024/make-localllm-easier"
+
+[project.scripts]
+localllm = "localllm.cli:main"
+make-localllm-easier = "localllm.cli:main"
+
+[tool.setuptools]
+packages = ["localllm"]

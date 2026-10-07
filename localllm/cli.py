@@ -1,0 +1,193 @@
+"""make-localllm-easier: one command, the best local AI your computer can run.
+
+  localllm                  check this PC, pick the best model, download, start, open the chat page
+  localllm doctor           what GPU/RAM you have and which model fits
+  localllm list             every model we have measured
+  localllm serve [MODEL]    start an OpenAI-compatible server only (http://127.0.0.1:8080/v1)
+  localllm eval             score a running server in English + your language (global and local exams)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+import webbrowser
+from pathlib import Path
+
+from . import __version__, catalog, runtime
+
+
+def _say(msg: str) -> None:
+    print(f"[localllm] {msg}", flush=True)
+
+
+def _download(url: str, dest: Path, label: str) -> None:
+    """Resumable download with a one-line progress bar."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    done = tmp.stat().st_size if tmp.exists() else 0
+    req = urllib.request.Request(url, headers={"Range": f"bytes={done}-"} if done else {})
+    with urllib.request.urlopen(req) as r, open(tmp, "ab") as f:
+        total = done + int(r.headers.get("Content-Length") or 0)
+        t0, got = time.time(), 0
+        while chunk := r.read(1 << 22):
+            f.write(chunk); got += len(chunk)
+            if total:
+                pct = 100 * (done + got) / total
+                speed = got / max(time.time() - t0, 1e-3) / 2**20
+                print(f"\r  {label}: {pct:5.1f}% of {total / 2**30:.1f} GB  ({speed:.0f} MB/s)  ", end="", flush=True)
+    print()
+    tmp.replace(dest)
+
+
+def _model_path(key: str) -> Path:
+    m = catalog.MODELS[key]
+    for d in filter(None, os.environ.get("LOCALLLM_MODELS", "").split(os.pathsep)):
+        if (Path(d) / m["file"]).exists():
+            return Path(d) / m["file"]
+    dest = runtime.HOME / "models" / m["file"]
+    if not dest.exists():
+        _say(f"downloading {key} ({m['gb']} GB, one time) ...")
+        _download(f"https://huggingface.co/{m['repo']}/resolve/main/{m['file']}", dest, m["file"])
+    return dest
+
+
+def _machine():
+    server = runtime.find_server()
+    devs = runtime.devices(server)
+    return server, devs, runtime.best_device(devs), runtime.ram_gb()
+
+
+def _start(key: str | None, port: int, ctx: int) -> tuple[subprocess.Popen, str]:
+    server, _devs, dev, _ram = _machine()
+    from .bench import system_language
+    key = key or (catalog.pick(dev["total_gb"], system_language()) if dev else None)
+    if not key:
+        sys.exit("[localllm] no measured model fits this GPU yet (need >= 10 GB VRAM). See `localllm list`.")
+    model = _model_path(key)
+    args = runtime.server_args(model, dev["id"] if dev else None, port, ctx, catalog.MODELS[key]["mtp"])
+    runtime.HOME.mkdir(parents=True, exist_ok=True)
+    log = open(runtime.HOME / "llama-server.log", "ab")
+    proc = subprocess.Popen([str(server), *args], env=runtime.server_env(), stdout=log, stderr=subprocess.STDOUT)
+    _say(f"loading {key} on {dev['name'] if dev else 'CPU'} ...")
+    url = f"http://127.0.0.1:{port}"
+    for _ in range(1000):
+        if proc.poll() is not None:
+            sys.exit(f"[localllm] llama-server stopped (exit {proc.returncode}); log: {runtime.HOME / 'llama-server.log'}")
+        try:
+            if b'"ok"' in urllib.request.urlopen(url + "/health", timeout=2).read():
+                return proc, url
+        except OSError:
+            pass
+        time.sleep(0.3)
+    proc.kill()
+    sys.exit("[localllm] model did not load within 5 minutes")
+
+
+def cmd_run(a) -> None:
+    proc, url = _start(a.model, a.port, a.ctx)
+    _say(f"ready. chat: {url}   API (OpenAI-compatible): {url}/v1   Ctrl+C to stop")
+    if not a.no_browser:
+        webbrowser.open(url)
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+
+
+def cmd_serve(a) -> None:
+    a.no_browser = True
+    cmd_run(a)
+
+
+ICON = {"fits": "OK  ", "low-bits": "WARN", "offload-moe": "SLOW", "offload-dense": "SLOW", "too-big": "NO  "}
+
+
+def cmd_doctor(_a) -> None:
+    from . import sizing
+    from .bench import system_language
+    server, devs, dev, ram = _machine()
+    lang = system_language()
+    gpu = dev["name"] if dev else "no GPU found"
+    vram = dev["total_gb"] if dev else 0.0
+    bw = sizing.bandwidth(gpu)
+    print(f"GPU {gpu}  {vram:.1f} GB" + (f"  ({bw} GB/s)" if bw else "") + f"    RAM {ram:.0f} GB    language: {lang}")
+    print("\nModel sizes for this PC (whole model on the GPU = fast):")
+    for r in sizing.tiers(vram, ram, gpu):
+        speed = f"~{r['tok_s']} tok/s (est.)" if r["tok_s"] else ""
+        what = {"fits": f"{r['quant']} {r['gb']} GB  {speed}",
+                "low-bits": f"only at {r['quant']} ({r['gb']} GB) - fits, but quality drops sharply below 3 bits",
+                "offload-moe": f"{r['quant']} {r['gb']} GB with experts in RAM - works, ~10-25 tok/s",
+                "offload-dense": f"{r['quant']} {r['gb']} GB with layers in RAM - very slow (< 5 tok/s)",
+                "too-big": f"needs ~{r['gb']} GB - too big for this PC"}[r["status"]]
+        print(f"  [{ICON[r['status']]}] {r['shape']:24} {what}")
+    key = catalog.pick(vram, lang) if dev else None
+    if not key:
+        print("\nNo measured model fits this GPU yet. Run `localllm list`, or help by measuring one (`localllm eval`).")
+        return
+    m = catalog.MODELS[key]
+    ctx = sizing.context_tokens(vram, m)
+    print(f"\nBest measured model for you: {key}  ({m['note']})")
+    print("What it can do here:")
+    shown = [t for t in sorted(m["scores"]) if t.split("/")[0] in (lang, "en")]
+    others = sorted({t.split("/")[0] for t in m["scores"]} - {lang, "en"})
+    for test in shown:
+        acc = m["scores"][test]
+        tl, suite = test.split("/")
+        kind = "translated world-knowledge exam" if suite == "global" else "real local school/licence exams"
+        mark = "  <- your language" if tl == lang else ""
+        print(f"  {tl.upper():3} {kind:32} {acc:5.1f}% correct{mark}")
+    if others:
+        print(f"  also measured in {', '.join(others)} (`localllm list`)")
+    print(f"  holds ~{ctx // 1000}k tokens at once (~{ctx // sizing.TOKENS_PER_PAGE} pages of text) next to the model")
+    same = bw == sizing.BANDWIDTH["rx 9070 xt"]
+    est = m["tok_s_9070xt"] if same else (int(m["tok_s_9070xt"] * bw / 640) if bw else None)
+    if est:
+        print(f"  answers at ~{est} tok/s" + ("" if same else " (estimated from memory bandwidth)"))
+    print(f"\nRun it: localllm        (llama.cpp: {server})")
+
+
+def cmd_list(_a) -> None:
+    print(f"{'model':22} {'weights':>8} {'tok/s*':>7}  scores")
+    for k, m in sorted(catalog.MODELS.items(), key=lambda kv: -catalog.score(kv[0])):
+        sc = "  ".join(f"{t} {v:.1f}" for t, v in m["scores"].items())
+        print(f"{k:22} {m['gb']:6.1f}GB {m['tok_s_9070xt']:7}  {sc}")
+    print("* decode speed on an RX 9070 XT 16 GB.  scores: accuracy % from `localllm eval` (lang/suite)")
+
+
+def cmd_eval(a) -> None:
+    from . import bench
+    langs = a.langs.split(",") if a.langs else sorted({"en", bench.system_language()})
+    _say(f"benchmarking {a.url} in: {', '.join(langs)}  (pick others with --langs ja,de,...)")
+    bench.run(a.url, a.name, langs, a.limit)
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="localllm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=__version__)
+    ap.add_argument("--model", choices=list(catalog.MODELS), help="override the automatic pick")
+    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--ctx", type=int, default=8192, help="context length in tokens")
+    ap.add_argument("--no-browser", action="store_true")
+    ap.set_defaults(fn=cmd_run)
+    sub = ap.add_subparsers(dest="cmd")
+    sub.add_parser("doctor").set_defaults(fn=cmd_doctor)
+    sub.add_parser("list").set_defaults(fn=cmd_list)
+    s = sub.add_parser("serve"); s.add_argument("model", nargs="?", choices=list(catalog.MODELS))
+    s.add_argument("--port", type=int, default=8080); s.add_argument("--ctx", type=int, default=8192)
+    s.set_defaults(fn=cmd_serve)
+    e = sub.add_parser("eval"); e.add_argument("--url", default="http://127.0.0.1:8080")
+    e.add_argument("--name", default="model"); e.add_argument("--limit", type=int, default=0)
+    e.add_argument("--langs", help="comma-separated ISO codes, default: en + this PC's language")
+    e.set_defaults(fn=cmd_eval)
+    a = ap.parse_args()
+    if a.fn is cmd_serve:
+        a.model = a.model or None
+    a.fn(a)
+
+
+if __name__ == "__main__":
+    main()
