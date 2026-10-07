@@ -57,8 +57,8 @@ Best measured model for you: gemma4-26b-a4b-qat  (MoE with ~4B active params: fa
 What it can do here:
   TH  real local school/licence exams   65.7% correct  <- your language
   holds ~78k tokens at once (~130 pages of text) next to the model
-  uses ~0.8 GB of system RAM: ~0.3 GB embeddings/CPU-mapped + ~0.5 GB caches (est.)
-  leaves ~24 GB of RAM free for other apps (est.)
+  uses ~34.7 GB of system RAM: ~0.3 GB embeddings/CPU-mapped + ~8.0 GB prompt cache + ~25.9 GB ctx checkpoints + ~0.5 GB host (est.)
+  leaves ~0 GB of RAM free for other apps (est.)
   answers at ~69 tok/s
 ```
 
